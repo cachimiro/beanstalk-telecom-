@@ -1,0 +1,24 @@
+# Secrets — never commit
+.env
+.env.droplet
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# SSH keys
+*.pem
+*_key
+*_key.pub
+
+# OS
+.DS_Store
