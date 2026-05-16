@@ -43,7 +43,7 @@ def _send(to: str, subject: str, html_body: str, text_fallback: str = "") -> str
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as smtp:
             smtp.ehlo()
             smtp.starttls()
             smtp.login(settings.GMAIL_ADDRESS, settings.GMAIL_APP_PASSWORD)
@@ -77,7 +77,7 @@ def _send_plain(to: str, subject: str, text_body: str) -> str:
     msg.attach(MIMEText(text_body, "plain"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as smtp:
             smtp.ehlo()
             smtp.starttls()
             smtp.login(settings.GMAIL_ADDRESS, settings.GMAIL_APP_PASSWORD)

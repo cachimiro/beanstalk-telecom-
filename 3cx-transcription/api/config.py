@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # AssemblyAI — env file uses 'assemblyapi', normalised here
     ASSEMBLYAI_API_KEY: str = ""
     assemblyapi: str = ""  # alias from .env file
-    ASSEMBLYAI_MODEL: str = "universal-3-pro"
+    ASSEMBLYAI_MODEL: str = "best"
     ASSEMBLYAI_SPEAKER_DIARIZATION: bool = True
     ASSEMBLYAI_WEBHOOK_SECRET: str = ""
 

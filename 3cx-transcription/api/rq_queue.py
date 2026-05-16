@@ -4,7 +4,6 @@ from datetime import timedelta
 
 import redis
 from rq import Queue
-from rq.job import Job
 
 from api.config import settings
 
@@ -34,8 +33,7 @@ def enqueue_job(job_id: str) -> None:
     q.enqueue(
         "worker.tasks.process_recording_job",
         job_id,
-        job_timeout=600,  # 10 min max per job
-        retry=None,  # retries handled inside the task
+        job_timeout=600,
     )
     logger.info("Enqueued process_recording_job for job_id=%s", job_id)
 

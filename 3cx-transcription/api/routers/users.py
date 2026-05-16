@@ -194,13 +194,17 @@ async def toggle_user(user_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{user_id}/test-email")
 async def test_email(user_id: str, db: AsyncSession = Depends(get_db)):
+    import asyncio
     result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     try:
-        message_id = send_test_email(user.email, user.full_name)
+        loop = asyncio.get_event_loop()
+        message_id = await loop.run_in_executor(
+            None, send_test_email, user.email, user.full_name
+        )
         return {"status": "sent", "message_id": message_id, "recipient": user.email}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Email delivery failed: {exc}")
