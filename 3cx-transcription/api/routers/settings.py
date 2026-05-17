@@ -1,16 +1,21 @@
 """Admin settings API — read/write non-sensitive settings from DB."""
+import uuid
+from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime
 
 from api.auth import get_current_admin
 from api.config import settings as app_settings
 from api.db.base import get_db
 from api.models.setting import Setting
+from api.models.recording_job import RecordingJob
+from api.rq_queue import enqueue_job
+from api.services.gcs import list_recent_recordings
+from api.services.parser import parse_recording_path
 
 router = APIRouter(dependencies=[Depends(get_current_admin)])
 
@@ -64,6 +69,63 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
             "GMAIL_APP_PASSWORD": _mask(app_settings.GMAIL_APP_PASSWORD),
         },
     }
+
+
+class TestPipelineRun(BaseModel):
+    gcs_object_name: str
+
+
+@router.get("/test-pipeline/recordings")
+async def list_test_recordings():
+    """Return the 10 most recent recordings from GCS for manual pipeline testing."""
+    try:
+        recordings = list_recent_recordings(
+            bucket_name=app_settings.GCP_BUCKET_NAME,
+            prefix=app_settings.GCP_RECORDINGS_PREFIX,
+            limit=10,
+        )
+        return {"recordings": recordings}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list GCS recordings: {exc}")
+
+
+@router.post("/test-pipeline/run")
+async def run_test_pipeline(body: TestPipelineRun, db: AsyncSession = Depends(get_db)):
+    """Create a test job for the given GCS object and queue it through the full pipeline.
+
+    The result email is always sent to ADMIN_EMAIL regardless of the recording's extension.
+    """
+    if not app_settings.ADMIN_EMAIL:
+        raise HTTPException(status_code=400, detail="ADMIN_EMAIL is not configured")
+
+    # Parse filename best-effort (don't fail if unparseable — it's a test)
+    parsed = parse_recording_path(body.gcs_object_name)
+
+    job = RecordingJob(
+        gcs_bucket=app_settings.GCP_BUCKET_NAME,
+        gcs_object_name=body.gcs_object_name,
+        gcs_generation=f"test-{uuid.uuid4().hex[:8]}",
+        status="queued",
+        recipient_email=app_settings.ADMIN_EMAIL,
+        created_at=datetime.utcnow(),
+    )
+
+    if parsed:
+        job.extracted_name = parsed.user_name
+        job.folder_extension = parsed.folder_extension
+        job.filename_extension = parsed.filename_extension
+        job.phone_number = parsed.phone_number
+        job.call_timestamp = parsed.timestamp
+        job.call_id = parsed.call_id
+        job.file_extension = parsed.file_extension
+
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    enqueue_job(str(job.id))
+
+    return {"job_id": str(job.id), "status": "queued", "recipient_email": app_settings.ADMIN_EMAIL}
 
 
 @router.put("")

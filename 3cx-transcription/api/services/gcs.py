@@ -56,6 +56,32 @@ def delete_temp_file(path: str) -> None:
         logger.warning("Failed to delete temp file %s: %s", path, exc)
 
 
+def list_recent_recordings(bucket_name: str, prefix: str, limit: int = 10) -> list[dict]:
+    """Return the most recent recording objects from GCS, sorted newest first.
+
+    Each item: { "name": str, "size": int, "updated": str (ISO 8601) }
+    """
+    client = _get_client()
+    bucket = client.bucket(bucket_name)
+    blobs = list(client.list_blobs(bucket, prefix=prefix))
+
+    # Filter to audio files only
+    audio_exts = {".wav", ".mp3", ".ogg", ".m4a", ".flac"}
+    blobs = [b for b in blobs if any(b.name.lower().endswith(ext) for ext in audio_exts)]
+
+    # Sort by updated descending
+    blobs.sort(key=lambda b: b.updated, reverse=True)
+
+    return [
+        {
+            "name": b.name,
+            "size": b.size,
+            "updated": b.updated.isoformat() if b.updated else None,
+        }
+        for b in blobs[:limit]
+    ]
+
+
 def get_signed_url(bucket_name: str, object_name: str, expiration_seconds: int = 3600) -> str:
     """Generate a signed URL for AssemblyAI to fetch the audio directly."""
     client = _get_client()

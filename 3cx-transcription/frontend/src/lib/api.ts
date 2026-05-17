@@ -52,3 +52,10 @@ export const getSettings = () => api.get("/settings");
 
 export const updateSettings = (data: Record<string, string>) =>
   api.put("/settings", data);
+
+// ── Test Pipeline ─────────────────────────────────────────────────────────────
+export const getTestRecordings = () =>
+  api.get("/settings/test-pipeline/recordings").then((r) => r.data);
+
+export const runTestPipeline = (gcsObjectName: string) =>
+  api.post("/settings/test-pipeline/run", { gcs_object_name: gcsObjectName }).then((r) => r.data);

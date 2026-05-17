@@ -1,10 +1,18 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getSettings, updateSettings } from "@/lib/api";
+import { getSettings, updateSettings, getTestRecordings, runTestPipeline } from "@/lib/api";
 
 export default function Settings() {
   const qc = useQueryClient();
   const [toast, setToast] = useState("");
+  const [toastType, setToastType] = useState<"success" | "error">("success");
+  const [selectedRecording, setSelectedRecording] = useState("");
+
+  const showToast = (msg: string, type: "success" | "error" = "success") => {
+    setToast(msg);
+    setToastType(type);
+    setTimeout(() => setToast(""), 5000);
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ["settings"],
@@ -17,8 +25,24 @@ export default function Settings() {
     mutationFn: (d: Record<string, string>) => updateSettings(d),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["settings"] });
-      setToast("Settings saved.");
-      setTimeout(() => setToast(""), 3000);
+      showToast("Settings saved.");
+    },
+  });
+
+  const { data: recordingsData, isLoading: recordingsLoading } = useQuery({
+    queryKey: ["testRecordings"],
+    queryFn: getTestRecordings,
+  });
+
+  const testMutation = useMutation({
+    mutationFn: (name: string) => runTestPipeline(name),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      showToast(`Test job queued (ID: ${data.job_id}). Email will be sent to ${data.recipient_email}. Check the Jobs page for progress.`, "success");
+      setSelectedRecording("");
+    },
+    onError: (err: any) => {
+      showToast(err?.response?.data?.detail || "Failed to start test pipeline.", "error");
     },
   });
 
@@ -30,6 +54,9 @@ export default function Settings() {
     saveMutation.mutate(form);
   };
 
+  const recordings: { name: string; size: number; updated: string }[] =
+    recordingsData?.recordings ?? [];
+
   const val = (key: string) => (key in form ? form[key] : dbSettings[key] ?? "");
 
   if (isLoading) return <div className="p-6 text-gray-400">Loading…</div>;
@@ -37,7 +64,7 @@ export default function Settings() {
   return (
     <div className="p-6 max-w-3xl">
       {toast && (
-        <div className="fixed top-4 right-4 bg-gray-900 text-white text-sm px-4 py-2 rounded-md shadow-lg z-50">
+        <div className={`fixed top-4 right-4 max-w-sm text-white text-sm px-4 py-2 rounded-md shadow-lg z-50 ${toastType === "error" ? "bg-red-600" : "bg-gray-900"}`}>
           {toast}
         </div>
       )}
@@ -106,7 +133,7 @@ export default function Settings() {
       </div>
 
       {/* Read-only env info */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-white border border-gray-200 rounded-lg p-5 mb-6">
         <h2 className="text-sm font-semibold text-gray-900 mb-1">Environment</h2>
         <p className="text-xs text-gray-500 mb-4">API keys are masked. Change them by updating the .env file on the server.</p>
         <dl className="grid grid-cols-2 gap-3">
@@ -117,6 +144,56 @@ export default function Settings() {
             </div>
           ))}
         </dl>
+      </div>
+
+      {/* Test Pipeline */}
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <h2 className="text-sm font-semibold text-gray-900 mb-1">Test Pipeline</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Pick a recent recording from GCS, run it through the full pipeline (transcription → summary → email),
+          and send the result to the admin email. This is a manual test only.
+        </p>
+
+        <div className="flex gap-3 items-end">
+          <div className="flex-1">
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Recent Recordings
+            </label>
+            <select
+              value={selectedRecording}
+              onChange={(e) => setSelectedRecording(e.target.value)}
+              disabled={recordingsLoading || testMutation.isPending}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+            >
+              <option value="">
+                {recordingsLoading ? "Loading recordings…" : recordings.length === 0 ? "No recordings found" : "Select a recording…"}
+              </option>
+              {recordings.map((r) => {
+                const filename = r.name.split("/").pop() ?? r.name;
+                const date = r.updated ? new Date(r.updated).toLocaleString() : "";
+                return (
+                  <option key={r.name} value={r.name}>
+                    {filename} — {date}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          <button
+            onClick={() => testMutation.mutate(selectedRecording)}
+            disabled={!selectedRecording || testMutation.isPending}
+            className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+          >
+            {testMutation.isPending ? "Running…" : "Run Test"}
+          </button>
+        </div>
+
+        {testMutation.isPending && (
+          <p className="mt-3 text-xs text-gray-500">
+            Job queued — the worker is downloading and processing the recording. This may take 1–2 minutes.
+          </p>
+        )}
       </div>
     </div>
   );
