@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 @router.post("/gcs")
 async def gcs_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
     x_webhook_secret: Optional[str] = Header(default=None),
@@ -81,6 +80,17 @@ async def gcs_webhook(
 
     # ── Parse filename ────────────────────────────────────────────────────────
     parsed = parse_recording_path(object_name)
+    if not parsed:
+        # Unparseable filename — not a recording we can process, ignore silently
+        logger.debug("Parser failure, ignoring: %s", object_name)
+        return {"status": "ignored", "reason": "parser_failure"}
+
+    # ── Match user — must happen before any DB write ──────────────────────────
+    matched = await match_user(db, parsed)
+    if not matched:
+        # No registered user for this extension — ignore silently, no DB record
+        logger.debug("No user matched for extension=%s, ignoring: %s", parsed.folder_extension, object_name)
+        return {"status": "ignored", "reason": "unmatched"}
 
     # ── Deduplicate ───────────────────────────────────────────────────────────
     existing = await db.execute(
@@ -94,7 +104,7 @@ async def gcs_webhook(
         logger.info("Duplicate GCS event ignored: %s", object_name)
         return {"status": "ignored", "reason": "duplicate"}
 
-    # ── Create job ────────────────────────────────────────────────────────────
+    # ── Create job (only for matched users) ───────────────────────────────────
     job = RecordingJob(
         gcs_bucket=bucket,
         gcs_object_name=object_name,
@@ -102,30 +112,20 @@ async def gcs_webhook(
         file_size=int(file_size) if file_size else None,
         status="received",
         created_at=datetime.utcnow(),
+        extracted_name=parsed.user_name,
+        folder_extension=parsed.folder_extension,
+        filename_extension=parsed.filename_extension,
+        phone_number=parsed.phone_number,
+        call_timestamp=parsed.timestamp,
+        call_id=parsed.call_id,
+        file_extension=parsed.file_extension,
+        matched_user_id=matched.id,
+        recipient_email=matched.email,
     )
-
-    if parsed:
-        job.extracted_name = parsed.user_name
-        job.folder_extension = parsed.folder_extension
-        job.filename_extension = parsed.filename_extension
-        job.phone_number = parsed.phone_number
-        job.call_timestamp = parsed.timestamp
-        job.call_id = parsed.call_id
-        job.file_extension = parsed.file_extension
-
-        # Match user
-        matched = await match_user(db, parsed)
-        if matched:
-            job.matched_user_id = matched.id
-            job.recipient_email = matched.email
-        else:
-            job.status = "unmatched"
-    else:
-        job.status = "failed_parser"
 
     try:
         db.add(job)
-        await db.flush()  # get job.id before commit
+        await db.flush()
         await log_async(db, job.id, "info", f"Job created from GCS event messageId={message_id}")
         await db.commit()
     except IntegrityError:
@@ -133,20 +133,7 @@ async def gcs_webhook(
         logger.info("Race-condition duplicate ignored: %s", object_name)
         return {"status": "ignored", "reason": "duplicate"}
 
-    # ── Post-creation actions ─────────────────────────────────────────────────
-    if job.status == "failed_parser":
-        from api.services.email import send_admin_alert_parser_failure
-        background_tasks.add_task(send_admin_alert_parser_failure, object_name)
-        logger.error("Parser failure for object: %s", object_name)
-        return {"status": "ok", "job_id": str(job.id), "note": "parser_failed"}
-
-    if job.status == "unmatched":
-        from api.services.email import send_admin_alert_unmatched
-        background_tasks.add_task(send_admin_alert_unmatched, object_name, parsed)
-        logger.warning("Unmatched recording: %s", object_name)
-        return {"status": "ok", "job_id": str(job.id), "note": "unmatched"}
-
-    # Enqueue for processing
+    # ── Enqueue for processing ────────────────────────────────────────────────
     enqueue_job(str(job.id))
     await db.execute(
         RecordingJob.__table__.update()
@@ -155,7 +142,7 @@ async def gcs_webhook(
     )
     await db.commit()
 
-    logger.info("Job %s queued for processing", job.id)
+    logger.info("Job %s queued for processing user=%s", job.id, matched.email)
     return {"status": "ok", "job_id": str(job.id)}
 
 
