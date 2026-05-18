@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, DateTime, text
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, DateTime, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.db.base import Base
 
@@ -39,6 +39,8 @@ class RecordingJob(Base):
     assemblyai_transcript_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     email_transcript_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    summary_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcript_html: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Speaker re-classification
     speaker_confidence_score: Mapped[float | None] = mapped_column(nullable=True)

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     ASSEMBLYAI_MODEL: str = "best"
     ASSEMBLYAI_SPEAKER_DIARIZATION: bool = True
     ASSEMBLYAI_WEBHOOK_SECRET: str = ""
+    ASSEMBLYAI_SPEAKERS_EXPECTED: int = 2  # set to 0 to let AssemblyAI auto-detect
 
     # OpenAI
     OPENAI_API_KEY: str = ""

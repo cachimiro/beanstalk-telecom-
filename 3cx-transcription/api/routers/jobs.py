@@ -12,7 +12,7 @@ from api.db.base import get_db
 from api.models.recording_job import RecordingJob
 from api.models.processing_log import ProcessingLog
 from api.models.user import User
-from api.rq_queue import enqueue_retry
+from api.rq_queue import enqueue_retry, enqueue_email_retry
 
 router = APIRouter(dependencies=[Depends(get_current_admin)])
 
@@ -136,11 +136,20 @@ async def retry_job(job_id: str, db: AsyncSession = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.status not in ("failed", "unmatched", "failed_parser"):
+    if job.status not in ("failed", "unmatched", "failed_parser", "email_failed"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot retry job with status '{job.status}'. Only failed/unmatched/failed_parser jobs can be retried.",
+            detail=f"Cannot retry job with status '{job.status}'. Only failed/unmatched/failed_parser/email_failed jobs can be retried.",
         )
+
+    if job.status == "email_failed":
+        # Email-only retry: the pipeline already completed — just re-send the
+        # stored emails without re-downloading from GCS or re-transcribing.
+        job.status = "queued"
+        job.error_message = None
+        await db.commit()
+        enqueue_email_retry(job_id)
+        return {"status": "queued", "job_id": job_id, "mode": "email_only"}
 
     job.status = "queued"
     job.error_message = None

@@ -22,9 +22,15 @@ _SECTION_BG = "#f7faff"
 _CHEAP_MODEL = "gpt-4o-mini"
 _NON_RETRYABLE_ERRORS = (AuthenticationError,)
 
+# Module-level singleton — avoids re-instantiating the client on every call
+_client: OpenAI | None = None
+
 
 def _openai_client() -> OpenAI:
-    return OpenAI(api_key=settings.OPENAI_API_KEY)
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    return _client
 
 
 def _is_model_error(exc: APIError) -> bool:
@@ -168,7 +174,13 @@ def classify_speakers(utterances: list, metadata: dict, confidence_threshold: fl
     client = _openai_client()
     model = settings.effective_speaker_model
 
-    sample = utterances[:60]
+    # Sample first 20 + last 10 utterances — captures opening greetings and
+    # closing name mentions without being biased toward only the call's start.
+    head = utterances[:20]
+    tail = utterances[-10:] if len(utterances) > 20 else []
+    seen = {id(u) for u in head}
+    sample = head + [u for u in tail if id(u) not in seen]
+
     payload = {
         "utterances": [
             {"speaker": u.get("speaker"), "text": u.get("text", ""), "start": u.get("start"), "end": u.get("end")}
@@ -215,10 +227,8 @@ _SUMMARY_SYSTEM = """You are an expert call-analysis assistant for telecommunica
 
 You MUST follow every rule below EXACTLY:
 
-1. Output TWO summaries:
-   - English Summary
-   - Original-Language Summary
-   Do NOT skip either.
+1. Output ONE summary in English only.
+   The full conversation transcript is sent separately in the original language — do NOT duplicate it here.
 
 2. STRICT NO-HALLUCINATION POLICY
    You MUST NOT invent, guess, infer, or assume ANY of the following:
@@ -228,12 +238,10 @@ You MUST follow every rule below EXACTLY:
    - [Name Not Provided], [Role Not Provided], [Company Not Provided], [Not Mentioned]
 
 3. LANGUAGE
-   Auto-detect the language (e.g., "Spanish (es)").
-   English summary must ALWAYS be in English.
-   Original-language summary MUST be written in the exact detected language.
+   The summary MUST always be written in English, regardless of the transcript language.
 
 4. STRUCTURE (MUST ALWAYS match EXACT format)
-   Each summary MUST contain these SIX sections in this order:
+   The summary MUST contain these SIX sections in this order:
    Title, Context, Agenda (UL list), Key Figures (UL list),
    Detailed Topics (OL list with nested UL), Follow-up Tasks (UL list)
    If a section has no data, output: None stated.
@@ -248,9 +256,8 @@ You MUST follow every rule below EXACTLY:
    Full HTML document, inline CSS only, no Markdown.
    Use <b> for headers, <br><br> for spacing.
    One centered container, max-width 680px.
-   Must contain these HTML comments exactly:
+   Must contain this HTML comment exactly:
    <!-- REQUIRED: ENGLISH SUMMARY START -->
-   <!-- REQUIRED: ORIGINAL-LANGUAGE SUMMARY START -->
    Use these exact colour values in all inline styles:
    PRIMARY = #2698ff
    PAGE_BG = #f0f4f8
@@ -281,6 +288,14 @@ def generate_html_summary(
         lines.append(f"{label}: {u.get('text', '').strip()}")
     transcript_block = "\n".join(lines)
 
+    # Guard against context-window overflow: truncate at ~80k tokens (chars/4).
+    # A truncated transcript still produces a useful summary of the call's content.
+    _MAX_TRANSCRIPT_CHARS = 320_000  # ~80k tokens
+    if len(transcript_block) > _MAX_TRANSCRIPT_CHARS:
+        transcript_block = transcript_block[:_MAX_TRANSCRIPT_CHARS]
+        transcript_block += "\n\n[Transcript truncated — call was very long]"
+        logger.warning("Transcript truncated to %d chars before summary call", _MAX_TRANSCRIPT_CHARS)
+
     user_msg = (
         f"Call Time: {call_time}\n"
         f"Detected Language: {detected_language}\n"
@@ -305,7 +320,7 @@ def generate_html_summary(
         return "0"
 
     if "REQUIRED: ENGLISH SUMMARY START" not in html:
-        logger.warning("Summary HTML missing required markers \u2014 retrying once")
+        logger.warning("Summary HTML missing required English marker \u2014 retrying once")
         try:
             html = _call_with_fallback(
                 client, models,
@@ -348,9 +363,22 @@ def generate_transcript_html(utterances: list, applied_labels: dict) -> Optional
     """
     Format utterances as HTML chat-bubble email body using gpt-4o-mini.
     Returns HTML string or None on failure.
+
+    For calls with more than 150 utterances the LLM call is skipped entirely
+    and None is returned so the caller falls back to _plain_transcript_html().
+    This prevents silent truncation on very long calls.
     """
     if not utterances:
         return "<p>No transcript available.</p>"
+
+    # Skip LLM call for very long calls — plain fallback is used instead.
+    _MAX_UTTERANCES_FOR_LLM = 150
+    if len(utterances) > _MAX_UTTERANCES_FOR_LLM:
+        logger.info(
+            "Transcript has %d utterances (> %d) — skipping LLM formatting, using plain fallback",
+            len(utterances), _MAX_UTTERANCES_FOR_LLM,
+        )
+        return None
 
     client = _openai_client()
 

@@ -159,7 +159,7 @@ import api.services.openai_summary as osm
 (ok if "confidence_score" in osm._SPEAKER_SYSTEM else fail)("speaker_prompt:confidence_score","missing")
 (ok if "0.75" in osm._SPEAKER_SYSTEM else fail)("speaker_prompt:threshold_0.75","missing")
 (ok if "REQUIRED: ENGLISH SUMMARY START" in osm._SUMMARY_SYSTEM else fail)("summary_prompt:english_marker","missing")
-(ok if "REQUIRED: ORIGINAL-LANGUAGE SUMMARY START" in osm._SUMMARY_SYSTEM else fail)("summary_prompt:orig_lang_marker","missing")
+(ok if "REQUIRED: ORIGINAL-LANGUAGE SUMMARY START" not in osm._SUMMARY_SYSTEM else fail)("summary_prompt:orig_lang_marker_removed","original-language marker should be absent — English only")
 (ok if "NO-HALLUCINATION" in osm._SUMMARY_SYSTEM else fail)("summary_prompt:no_hallucination_rule","missing")
 (ok if "Preserve every word EXACTLY" in osm._TRANSCRIPT_SYSTEM else fail)("transcript_prompt:exact_words","missing")
 (ok if "#ededed" in osm._TRANSCRIPT_SYSTEM else fail)("transcript_prompt:left_bubble_colour","missing")
@@ -226,8 +226,162 @@ for key,label in [("speaker_confidence_score","confidence_score"),
                   ("Likely Agent/Customer labels used","confidence_label_hint")]:
     (ok if key in detail else fail)(f"JobDetail.tsx:{label}","missing")
 
-# ── 12. SYNTAX CHECK ALL PYTHON FILES ────────────────────────────────────────
-section("12. Python syntax check")
+# ── 12. UTTERANCE SAMPLING LOGIC ─────────────────────────────────────────────
+section("12. Utterance sampling (classify_speakers)")
+from api.services.openai_summary import classify_speakers
+import inspect
+
+src = inspect.getsource(classify_speakers)
+(ok if "utterances[:20]" in src else fail)("sampling:head_20", "head slice not found")
+(ok if "utterances[-10:]" in src else fail)("sampling:tail_10", "tail slice not found")
+(ok if "utterances[:60]" not in src else fail)("sampling:no_old_60_slice", "old [:60] slice still present")
+
+# ── 13. TRANSCRIPT HTML UTTERANCE GUARD ──────────────────────────────────────
+section("13. Transcript HTML utterance guard")
+from api.services.openai_summary import generate_transcript_html
+
+src_t = inspect.getsource(generate_transcript_html)
+(ok if "150" in src_t else fail)("utterance_guard:threshold_150", "150 utterance threshold not found")
+(ok if "return None" in src_t else fail)("utterance_guard:returns_none", "guard should return None for plain fallback")
+
+big_utterances = [{"speaker": "A", "text": f"word {i}"} for i in range(151)]
+result = generate_transcript_html(big_utterances, {"A": "Agent"})
+(ok if result is None else fail)("utterance_guard:151_returns_none", f"expected None, got {type(result)}")
+
+# ── 14. TOKEN GUARD IN SUMMARY ────────────────────────────────────────────────
+section("14. Token guard in generate_html_summary")
+from api.services.openai_summary import generate_html_summary
+src_s = inspect.getsource(generate_html_summary)
+(ok if "320_000" in src_s or "320000" in src_s else fail)("token_guard:320k_char_limit", "320k char limit not found")
+(ok if "truncated" in src_s.lower() else fail)("token_guard:truncation_note", "truncation note not found")
+
+# ── 15. OPENAI CLIENT SINGLETON ───────────────────────────────────────────────
+section("15. OpenAI client singleton")
+import api.services.openai_summary as _oai_mod
+src_mod = inspect.getsource(_oai_mod)
+(ok if "_client: OpenAI | None = None" in src_mod else fail)("singleton:module_level_var", "module-level _client not found")
+(ok if "global _client" in src_mod else fail)("singleton:global_keyword", "global _client not found in getter")
+
+# ── 16. ENGLISH-ONLY SUMMARY PROMPT ──────────────────────────────────────────
+section("16. English-only summary prompt")
+from api.services.openai_summary import _SUMMARY_SYSTEM
+(ok if "REQUIRED: ENGLISH SUMMARY START" in _SUMMARY_SYSTEM else fail)(
+    "prompt:english_marker", "English marker missing from prompt")
+(ok if "REQUIRED: ORIGINAL-LANGUAGE SUMMARY START" not in _SUMMARY_SYSTEM else fail)(
+    "prompt:no_original_language_marker", "original-language marker still present")
+(ok if "Output ONE summary in English only" in _SUMMARY_SYSTEM else fail)(
+    "prompt:english_only_instruction", "English-only instruction missing")
+
+# ── 17. PUBSUB AUTH CERT CACHE ────────────────────────────────────────────────
+section("17. Pub/Sub auth cert cache")
+import api.services.pubsub_auth as _auth_mod
+src_auth = inspect.getsource(_auth_mod._get_google_certs)
+(ok if "_CERT_CACHE_TTL" in src_auth or "3600" in src_auth else fail)(
+    "cert_cache:ttl_present", "TTL not found in cert fetch function")
+(ok if "_cached_certs_at" in src_auth else fail)(
+    "cert_cache:timestamp_tracked", "_cached_certs_at not tracked")
+(ok if "using cached certs" in src_auth else fail)(
+    "cert_cache:stale_fallback", "stale cache fallback log message missing")
+(ok if hasattr(_auth_mod, "_cached_certs") else fail)("cert_cache:module_var_cached_certs", "missing")
+(ok if hasattr(_auth_mod, "_cached_certs_at") else fail)("cert_cache:module_var_cached_at", "missing")
+
+# ── 18. QUEUE UNAVAILABLE ERROR ───────────────────────────────────────────────
+section("18. QueueUnavailableError in rq_queue")
+from api.rq_queue import QueueUnavailableError, enqueue_job
+(ok if issubclass(QueueUnavailableError, RuntimeError) else fail)(
+    "queue_error:is_runtime_error", "QueueUnavailableError should subclass RuntimeError")
+src_q = inspect.getsource(enqueue_job)
+(ok if "QueueUnavailableError" in src_q else fail)("queue_error:raised_in_enqueue_job", "not raised")
+(ok if "ConnectionError" in src_q else fail)("queue_error:catches_connection_error", "not caught")
+(ok if "TimeoutError" in src_q else fail)("queue_error:catches_timeout_error", "not caught")
+
+# ── 19. WORKER RELIABILITY FIXES ─────────────────────────────────────────────
+section("19. Worker reliability fixes")
+import worker.tasks as _tasks
+src_w = inspect.getsource(_tasks)
+
+(ok if "continue_after_transcription" in inspect.getsource(_tasks._handle_failure) else fail)(
+    "worker:phase2_retry_path", "Phase 2 retry not in _handle_failure")
+(ok if "user.active" in src_w else fail)("worker:deactivated_user_guard", "user.active check missing")
+(ok if "User deactivated before processing" in src_w else fail)(
+    "worker:deactivated_user_message", "deactivated user message missing")
+(ok if "call_timestamp" in src_w else fail)("worker:call_time_from_filename", "call_timestamp not used")
+(ok if "strptime" in src_w else fail)("worker:call_time_strptime", "strptime not used for call_time")
+(ok if "SMTPRecipientsRefused" in src_w else fail)("worker:smtp_recipients_refused", "not handled")
+(ok if "SMTPAuthenticationError" in src_w else fail)("worker:smtp_auth_error", "not handled")
+(ok if "email_failed" in src_w else fail)("worker:email_failed_status", "email_failed status not used")
+(ok if "asyncio.run(" not in src_w else fail)("worker:no_asyncio_run", "asyncio.run() still present")
+(ok if "import redis" in src_w.split("def ")[0] else fail)(
+    "worker:redis_module_level_import", "redis not imported at module level")
+(ok if "from rq import Queue" in src_w.split("def ")[0] else fail)(
+    "worker:rq_module_level_import", "rq not imported at module level")
+(ok if "gcs_exceptions.NotFound" in src_w else fail)("worker:gcs_404_classified", "GCS 404 not classified")
+(ok if "gcs_exceptions.Forbidden" in src_w else fail)("worker:gcs_403_classified", "GCS 403 not classified")
+(ok if "httpx.HTTPStatusError" in src_w else fail)("worker:assemblyai_http_error", "HTTPStatusError not caught")
+(ok if "401, 403" in src_w or "(401, 403)" in src_w else fail)(
+    "worker:assemblyai_401_403_nonretryable", "401/403 non-retryable not found")
+(ok if "def retry_email_only" in src_w else fail)("worker:retry_email_only_exists", "function missing")
+(ok if "summary_html" in src_w else fail)("worker:stores_summary_html", "summary_html not stored")
+(ok if "transcript_html" in src_w else fail)("worker:stores_transcript_html", "transcript_html not stored")
+
+# ── 20. WEBHOOK RESILIENCE ────────────────────────────────────────────────────
+section("20. Webhook resilience")
+from api.routers.webhook import gcs_webhook
+src_wh = inspect.getsource(gcs_webhook)
+(ok if "non_audio" in src_wh else fail)("webhook:non_audio_ignored", "non_audio reason missing")
+(ok if "_SUPPORTED_AUDIO_EXTENSIONS" in src_wh else fail)(
+    "webhook:audio_extension_check", "extension check missing")
+(ok if "send_admin_alert_parser_failure" in src_wh else fail)(
+    "webhook:parser_failure_alert", "parser failure alert not wired up")
+(ok if "send_admin_alert_unmatched" in src_wh else fail)(
+    "webhook:unmatched_alert", "unmatched alert not wired up")
+(ok if "QueueUnavailableError" in src_wh else fail)(
+    "webhook:queue_unavailable_handled", "QueueUnavailableError not caught")
+(ok if "503" in src_wh else fail)("webhook:returns_503_on_queue_fail", "503 not returned")
+(ok if "background_tasks" in src_wh else fail)("webhook:uses_background_tasks", "BackgroundTasks not used")
+
+# ── 21. MIGRATION 0003 CONSISTENCY ───────────────────────────────────────────
+section("21. Migration 0003 consistency")
+mig_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "migrations", "versions", "0003_resilience_improvements.py")
+with open(mig_path) as f:
+    mig_src = f.read()
+from api.models.recording_job import RecordingJob as _RJ
+model_cols = {c.key for c in _RJ.__table__.columns}
+for col in ("summary_html", "transcript_html"):
+    (ok if col in mig_src else fail)(f"migration_0003:{col}_in_migration", "missing from migration")
+    (ok if col in model_cols else fail)(f"migration_0003:{col}_in_model", "missing from model")
+(ok if "uq_recording_jobs_object_generation" in mig_src else fail)(
+    "migration_0003:unique_index", "dedup index missing")
+
+# ── 22. EMAIL SERVICE — bad recipient alert ───────────────────────────────────
+section("22. Email service — bad recipient alert")
+from api.services.email import send_admin_alert_bad_recipient
+src_e = inspect.getsource(send_admin_alert_bad_recipient)
+(ok if "ADMIN_EMAIL" in src_e else fail)("email:bad_recipient_uses_admin_email", "missing")
+(ok if "Users page" in src_e else fail)("email:bad_recipient_users_page_link", "link missing")
+(ok if "jobs/" in src_e else fail)("email:bad_recipient_job_link", "job link missing")
+(ok if "_send_plain" in src_e else fail)("email:bad_recipient_uses_send_plain", "not using _send_plain")
+
+# ── 23. JOBS ROUTER — email_failed retry ─────────────────────────────────────
+section("23. Jobs router — email_failed retry")
+from api.routers.jobs import retry_job
+src_j = inspect.getsource(retry_job)
+(ok if "email_failed" in src_j else fail)("jobs:email_failed_in_retryable_statuses", "missing")
+(ok if "enqueue_email_retry" in src_j else fail)("jobs:enqueue_email_retry_called", "missing")
+(ok if "email_only" in src_j else fail)("jobs:email_only_mode_returned", "mode not returned")
+
+# ── 24. ASSEMBLYAI — speakers_expected from config ───────────────────────────
+section("24. AssemblyAI — speakers_expected from config")
+from api.services.assemblyai import submit_transcription
+src_a = inspect.getsource(submit_transcription)
+(ok if "ASSEMBLYAI_SPEAKERS_EXPECTED" in src_a else fail)(
+    "assemblyai:speakers_expected_from_config", "still hardcoded")
+(ok if '"speakers_expected": 2' not in src_a else fail)(
+    "assemblyai:no_hardcoded_2", "hardcoded 2 still present")
+
+# ── 25. SYNTAX CHECK ALL PYTHON FILES ────────────────────────────────────────
+section("25. Python syntax check")
 import py_compile, glob
 base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 for pattern in ["api/**/*.py","worker/*.py","migrations/**/*.py","scripts/*.py"]:

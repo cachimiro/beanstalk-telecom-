@@ -41,7 +41,7 @@ def submit_transcription(audio_url: str, job_id: str) -> str:
         "audio_url": audio_url,
         "speech_model": settings.ASSEMBLYAI_MODEL,
         "speaker_labels": settings.ASSEMBLYAI_SPEAKER_DIARIZATION,
-        "speakers_expected": 2,
+        "speakers_expected": settings.ASSEMBLYAI_SPEAKERS_EXPECTED,
         "punctuate": True,
         "format_text": True,
         "language_detection": True,
@@ -78,7 +78,7 @@ def upload_audio(file_path: str) -> str:
                     "authorization": settings.effective_assemblyai_key,
                     "content-type": "application/octet-stream",
                 },
-                content=f.read(),
+                content=f,  # stream from file handle, not f.read() into memory
             )
             resp.raise_for_status()
             return resp.json()["upload_url"]

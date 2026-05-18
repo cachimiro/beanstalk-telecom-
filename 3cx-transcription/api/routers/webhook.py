@@ -18,7 +18,9 @@ from api.models.recording_job import RecordingJob
 from api.services.parser import parse_recording_path
 from api.services.matcher import match_user
 from api.services.pubsub_auth import validate_oidc_token, validate_shared_secret
-from api.rq_queue import enqueue_job, enqueue_continuation
+from api.rq_queue import enqueue_job, enqueue_continuation, QueueUnavailableError
+
+_SUPPORTED_AUDIO_EXTENSIONS = {"wav", "mp3"}
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 @router.post("/gcs")
 async def gcs_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
     x_webhook_secret: Optional[str] = Header(default=None),
@@ -78,18 +81,26 @@ async def gcs_webhook(
 
     logger.info("GCS OBJECT_FINALIZE: bucket=%s object=%s generation=%s", bucket, object_name, generation)
 
+    # ── Ignore non-audio files silently ──────────────────────────────────────
+    file_ext = object_name.rsplit(".", 1)[-1].lower() if "." in object_name else ""
+    if file_ext not in _SUPPORTED_AUDIO_EXTENSIONS:
+        logger.debug("Non-audio file ignored: %s (ext=%s)", object_name, file_ext)
+        return {"status": "ignored", "reason": "non_audio"}
+
     # ── Parse filename ────────────────────────────────────────────────────────
     parsed = parse_recording_path(object_name)
     if not parsed:
-        # Unparseable filename — not a recording we can process, ignore silently
-        logger.debug("Parser failure, ignoring: %s", object_name)
+        logger.warning("Parser failure for: %s", object_name)
+        from api.services.email import send_admin_alert_parser_failure
+        background_tasks.add_task(send_admin_alert_parser_failure, object_name)
         return {"status": "ignored", "reason": "parser_failure"}
 
     # ── Match user — must happen before any DB write ──────────────────────────
     matched = await match_user(db, parsed)
     if not matched:
-        # No registered user for this extension — ignore silently, no DB record
-        logger.debug("No user matched for extension=%s, ignoring: %s", parsed.folder_extension, object_name)
+        logger.info("No user matched for extension=%s: %s", parsed.folder_extension, object_name)
+        from api.services.email import send_admin_alert_unmatched
+        background_tasks.add_task(send_admin_alert_unmatched, object_name, parsed)
         return {"status": "ignored", "reason": "unmatched"}
 
     # ── Deduplicate ───────────────────────────────────────────────────────────
@@ -134,7 +145,17 @@ async def gcs_webhook(
         return {"status": "ignored", "reason": "duplicate"}
 
     # ── Enqueue for processing ────────────────────────────────────────────────
-    enqueue_job(str(job.id))
+    try:
+        enqueue_job(str(job.id))
+    except QueueUnavailableError as exc:
+        # Redis is down — roll back the job row so Pub/Sub can retry cleanly
+        await db.rollback()
+        logger.error("Queue unavailable, returning 503 so Pub/Sub retries: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Queue temporarily unavailable — will retry",
+        )
+
     await db.execute(
         RecordingJob.__table__.update()
         .where(RecordingJob.id == job.id)

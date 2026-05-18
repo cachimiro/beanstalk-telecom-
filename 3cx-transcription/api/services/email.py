@@ -198,6 +198,33 @@ async def send_admin_alert_job_failed(job) -> None:
         logger.error("Failed to send job failed alert: %s", exc)
 
 
+def send_admin_alert_bad_recipient(job, bad_email: str) -> None:
+    """Alert admin when a recipient email is permanently rejected by SMTP.
+
+    Called synchronously from the worker — no asyncio wrapper needed.
+    """
+    if not settings.ADMIN_EMAIL:
+        logger.warning("ADMIN_EMAIL not configured — cannot send bad-recipient alert")
+        return
+    subject = f"3CX — Bad Recipient Email: {bad_email}"
+    body = (
+        f"A recording job could not be delivered because the recipient email was rejected.\n\n"
+        f"Job ID:         {job.id}\n"
+        f"File:           {job.gcs_object_name}\n"
+        f"Bad Email:      {bad_email}\n"
+        f"Error:          {job.error_message or 'SMTP recipients refused'}\n\n"
+        f"Required Action:\n"
+        f"  Fix the email address in the Users page, then use the Retry button on the job.\n"
+        f"  All calls for this user are stored and will be re-sent once the email is corrected.\n\n"
+        f"Users page:  {settings.APP_URL}/admin/users\n"
+        f"Job detail:  {settings.APP_URL}/admin/jobs/{job.id}\n"
+    )
+    try:
+        _send_plain(settings.ADMIN_EMAIL, subject, body)
+    except Exception as exc:
+        logger.error("Failed to send bad-recipient alert to admin: %s", exc)
+
+
 def send_test_email(recipient_email: str, recipient_name: str) -> str:
     """Send a test HTML email to verify delivery for a user."""
     subject = "Test Email — 3CX Transcription System"
